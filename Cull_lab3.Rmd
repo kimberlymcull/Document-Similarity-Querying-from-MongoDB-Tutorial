@@ -1,0 +1,234 @@
+---
+title: "Document Similarity (MongoDB)"
+author: "LT Kimberly Cull"
+date: "25 October 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,echo = TRUE, collapse=TRUE, message=FALSE, include=TRUE)
+```
+
+The data set "nps_theses" contains nearly 31,000 summaries of Naval Postgraduate student theses and is stored in a MongoDB database. We would like to produce the top 20 theses that most closely resemble a given thesis proposal based upon the proposal's abstract. 
+
+To begin, we will need to establish a connection to MongoDB. Type the following code into the AMI command line: 
+
+```{}
+sudo service mongod start
+mongo
+quit()
+```
+
+After a connection has been established and confirmed, we will move to R studio to begin the text analysis. Establish a connection to the MongoDB server by installing the mongolite library and typing the following code into R:
+
+```{r}
+library(mongolite)
+
+# link to your database
+my_collection<-mongo(collection = "summaries", db = "nps_theses")
+```
+
+## Task 1 ##
+
+The data set "nps_theses" has 17 columns of information for each thesis. For the purposes of this lab, we will only need access to the title, abstract, id, and identifier columns. The abstracts will be used for determining similarity during text analysis. The id column provides the unique identifier associated with each thesis and the identifier columns provides an associated hyperlink for quick access to the full thesis text. To access this information from MongoDB, run the following code:
+
+```{r}
+# pull down abstracts and IDs from collection as dataframe
+dataframe <- data.frame(my_collection$find(fields='{"abstract":1,"id":1,"identifier":1,"title":1}'))
+```
+
+For this lab, we will use two different methods of text preparation in combination with two document similarity methods, jaccard similarity and cosine similarity. We will compare results and determine which overall method produces the most accurate and usable result.
+
+First, we will need to import a sample of an abstract from a thesis proposal (referred to as "proposal"" from here forward).For reference, the proposal chosen discusses human match making algorithms. Below is the abstract we will use:
+
+>"Matchmaking algorithms seek to articulate human chemistry in an effort to draw people into positive relationships. While imperfect, the continual collection and refinement of data is increasing the potential of algorithms to better predict human chemistry as it relates to naturally-forming relationships. Although these algorithms are typically advertised as being able to help build two-person relationships, it is becoming more likely that these algorithms may be able to expand to help build or refine multi-person teams."
+
+After installing the tm library, type the following code to import the txt file containing the proposal and turn its text into a corpus. 
+
+```{r}
+library(tm)
+#import W17_7.txt located in the Thesis_sample folder as a corpus
+Proposal <- Corpus(DirSource("/home/rstudio/Notebooks/Thesis_sample/"))
+```
+
+We will need to turn the abstracts into a corpus, also:
+
+```{r}
+Abstract <- Corpus(VectorSource(dataframe$abstract))
+```
+
+First, we will need to conduct some text preparation. We will normalize (all lowercase letters) and tokenize (punctuation removed) the proposal and abstracts. The following code will prep the proposal and, then, the abstracts pulled from the database.
+
+```{r}
+#Proposal text prep
+#tokenize
+Proposal_tok <- tm_map(Proposal, removePunctuation)
+#normalize
+Proposal_tok_norm<- tm_map(Proposal_tok, content_transformer(tolower))
+
+#Abstract text prep
+#tokenize
+Abstract_tok <- tm_map(Abstract, removePunctuation)
+#normalize
+Abstract_tok_norm<- tm_map(Abstract_tok, content_transformer(tolower))
+```
+
+Now, we will calculate document similarity distances. To do this, we will need to change the corpuses above into data frames.
+
+```{r}
+#change propsal corpuses to data frames
+Proposal_tok_norm=data.frame(text = sapply(Proposal_tok_norm, as.character), stringsAsFactors = FALSE)
+
+#change abstract corpuses to data frames
+Abstract_tok_norm=data.frame(text = sapply(Abstract_tok_norm, as.character), stringsAsFactors = FALSE)
+```
+
+After converting the corpuses to data frames, we will need to create a vector space. This will require the library text2vec. 
+
+```{r}
+library(text2vec)
+
+#creating itokens from data frames
+Proposal_tok_norm = itoken(Proposal_tok_norm$text, progressbar = FALSE)
+Abstract_tok_norm = itoken(Abstract_tok_norm$text, progressbar = FALSE)
+
+#creating vector space of abstracts
+v = create_vocabulary(Abstract_tok_norm) %>% prune_vocabulary(doc_proportion_max = 0.1, term_count_min = 5)
+vectorizer = vocab_vectorizer(v)
+Proposal_tok_norm = create_dtm(Proposal_tok_norm, vectorizer)
+Abstract_tok_norm = create_dtm(Abstract_tok_norm, vectorizer)
+```
+
+After placing the proposal and abstract into the same vector space, we can calculate distances. We will compare the top 10 results of distances measure with jaccard distances and, then, with cosine distances.
+
+```{r}
+#Calculate jaccard distances
+jac_sim = sim2(Proposal_tok_norm, Abstract_tok_norm, method = "jaccard", norm = "none")
+#Calculate cosine distances
+cos_sim= sim2(Proposal_tok_norm, Abstract_tok_norm, method = "cosine", norm = "none")
+
+#Add a column for each distance measure to the original data frame pull from mongoDB
+dataframe$jaccard=unlist(as.list(jac_sim))
+dataframe$cosine=unlist(as.list(cos_sim))
+
+#sort dataframe by distance to pull top 20 results
+Top_Jac= dataframe[order(-dataframe$jaccard),]
+Top_Cos= dataframe[order(-dataframe$cosine),]  
+
+#for results to be printed into a table
+library(knitr)
+#top 5 by title
+kable(Top_Jac[1:5,c(2,5)],row.names=FALSE)
+kable(Top_Cos[1:5,c(2,5)],row.names=FALSE)
+#top 10 by id and score
+kable(Top_Jac[1:10,c(2,6)],row.names=FALSE)
+kable(Top_Cos[1:10,c(2,7)],row.names=FALSE)
+```
+
+None of the 10 results from the jaccard and cosine calculations are the same because each calculates distance in a different way. We will continue on by using only cosine distance measures, since the top 5 thesis titles from cosine distances provided results more in line with the proposal's topic. We will compare the cosine results above to results calculated from adding stop words (removing commonly used words like the articles "the" and "a") to the original text preparation we performed earlier in this tutorial.
+
+
+```{r}
+#Proposal text prep
+#tokenize
+Proposal_tok <- tm_map(Proposal, removePunctuation)
+#normalize
+Proposal_tok_norm<- tm_map(Proposal_tok, content_transformer(tolower))
+#stop words
+Proposal_stop <- tm_map(Proposal_tok_norm, removeWords, stopwords("english"))
+
+#Abstract text prep
+#tokenize
+Abstract_tok <- tm_map(Abstract, removePunctuation)
+#normalize
+Abstract_tok_norm<- tm_map(Abstract_tok, content_transformer(tolower))
+#stop words
+Abstract_stop <- tm_map(Abstract_tok_norm, removeWords, stopwords("english"))
+```
+
+Just as before, we will turn the corpuses into data frames and create the vector space that we need in order to calculate cosine distances.
+
+```{r}
+#change propsal corpuses to data frames
+Proposal_stop=data.frame(text = sapply(Proposal_stop, as.character), stringsAsFactors = FALSE)
+
+#change abstract corpuses to data frames
+Abstract_stop=data.frame(text = sapply(Abstract_stop, as.character), stringsAsFactors = FALSE)
+
+#create vector space
+#creating itokens
+Proposal_stop = itoken(Proposal_stop$text, progressbar = FALSE)
+Abstract_stop = itoken(Abstract_stop$text, progressbar = FALSE)
+
+#creating vector space of abstracts
+v = create_vocabulary(Abstract_stop) %>% prune_vocabulary(doc_proportion_max = 0.1, term_count_min = 5)
+vectorizer = vocab_vectorizer(v)
+Proposal_stop = create_dtm(Proposal_stop, vectorizer)
+Abstract_stop = create_dtm(Abstract_stop, vectorizer)
+```
+
+Then, we will calculate cosine distances and pull the top 20 most similar to our proposal and compare to the top 20 from the original cosine distance calculations.
+
+```{r}
+#Calculate cosine distances
+cos_sim_stop= sim2(Proposal_stop, Abstract_stop, method = "cosine", norm = "none")
+
+#Add column for distance measure to the original data frame pull from mongoDB
+dataframe$newcosine=unlist(as.list(cos_sim_stop))
+
+#sort dataframe by distance to pull top 20 results
+Top_Cos_stop= dataframe[order(-dataframe$newcosine),]  
+
+#for results to be printed into a table
+#old results
+kable(Top_Cos[1:20,c(2,7)],row.names=FALSE)
+#new results
+kable(Top_Cos_stop[1:20,c(2,8)],row.names=FALSE)
+```
+
+The results are similar. The advantage to using stop words is to place more emphasis on buzz words that more uniquely describe the text being analyzed. 
+
+## Task 2 ##
+
+Using the cosine distance calculations performed on the stop word formatted text, we will plot the top 20 results.
+
+```{r}
+#make data frame of only the top 20
+result=Top_Cos_stop[1:20,c(2,8)]
+
+#reformat classes for graphing
+result$id=as.factor(result$id)
+result$newcosine=as.numeric(result$newcosine)
+
+#import graphing library
+library(ggplot2)
+#plot
+ggplot(result, aes(x = reorder(id,-newcosine), y = newcosine)) + theme_bw() +theme(axis.text.x = element_text(angle = 90, hjust = 1),plot.title = element_text(hjust = 0.5)) + geom_bar(stat = "identity",fill="blue")+ ggtitle("Document Similarity Results using Cosine Distances") + labs(y="Cosine Distances", x = "Thesis ID")
+```
+
+The graphic above demonstrates how the top 20 results compare with one another. 
+
+## Task 3 ##
+
+Once a user decides from the graph which thesis they would like to view, the thesis ID can be used to pull the identifier (html link leading to the entire thesis text) that is associated. This can be queried either directly from the database:
+
+```{r}
+#pull title and identifier associated with the number 1 result
+kable(my_collection$find('{"id":9123}', fields='{"title":1, "identifier":1}')[,-1])
+```
+
+Or, the results can simply be pull from the original database query.
+
+```{r}
+kable(dataframe[dataframe$id==9123,c(4,5)])
+```
+
+In either case, the user would probably not be familiar enough with R or MongoDB to pull the results themselves. A user interface would need to be created to have the user simply upload a text file of their proposal and view their results in the form of the graph above. Once the user decides which thesis it would like to view, the user can input the desired Thesis ID into the interface. One of the codes above could produce for them the title and identifier associated. The user could, then, choose to view the entire thesis by copying and pasting the identifier into their browser.
+
+
+
+
+
+
+
+
